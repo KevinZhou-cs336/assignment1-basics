@@ -1,0 +1,31 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            You are reviewing a CS336 (Large Language Models) assignment submission.
+            Please review this pull request and provide constructive feedback on:
+            - Correctness of the implementation
+            - Code quality and readability
+            - Potential bugs or edge cases
+            - Performance and efficiency considerations
+            - Any deviations from the assignment requirements
+
+            Be specific and educational in your feedback.
