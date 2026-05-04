@@ -88,6 +88,8 @@ class BPETokenizer(object):
             
                 for old_pair in zip(old_token, old_token[1:]):
                     pair_counts[old_pair] -= old_token_freq
+                    if pair_counts[old_pair] == 0:
+                        pair_counts.pop(old_pair)
                     pair_to_token_keys[old_pair].discard(old_token)
 
                 for new_pair in zip(new_token, new_token[1:]):
