@@ -48,28 +48,30 @@ class BPETokenizer(object):
         for i in range(256):
             vocab[i + special_vocab_size] = i.to_bytes(1)
 
-        merges = []
-        while len(vocab) < vocab_size:
-            pair_counts = Counter()
-            pair_to_pre_token_keys = collections.defaultdict(set)
-            # count pair freqs
-            # (q, u) -> [question, quit]
-            for pre_token, freq in tokenized_results.items():
-                for pair in zip(pre_token, pre_token[1:]):
-                    pair_counts[pair] += freq
-                    pair_to_pre_token_keys[pair].add(pre_token)
+        pair_counts = Counter()
+        pair_to_token_keys = collections.defaultdict(set)
+        # count pair freqs
+        # (q, u) -> [question, quit]
+        for pre_token, freq in tokenized_results.items():
+            for pair in zip(pre_token, pre_token[1:]):
+                pair_counts[pair] += freq
+                pair_to_token_keys[pair].add(pre_token)
 
+        merges = []
+        while len(vocab) < vocab_size:            
             # add new merge sequence
             merge_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
             merges.append(merge_pair)
-
+            
             # add new vocab
             vocab[len(vocab)] = b"".join(merge_pair)
 
-            # process existing pairs
-            for old_token in pair_to_pre_token_keys[merge_pair]:
+            old_tokens = pair_to_token_keys[merge_pair]
+            # process existing pairs, note use list to copy existing tokens to avoid
+            # reading a collection(pair_to_token_keys) that is being updated 
+            for old_token in list(old_tokens):
                 new_token = []
-                old_token_freq = tokenized_results.pop(old_token)
+                old_token_freq = tokenized_results.pop(tuple(old_token))
                 i = 0
                 while i <= len(old_token) - 1:
                     if (
@@ -82,7 +84,17 @@ class BPETokenizer(object):
                     else:
                         new_token.append(old_token[i])
                         i += 1
-                tokenized_results[tuple(new_token)] = old_token_freq
+                tokenized_results[tuple(new_token)] += old_token_freq
+            
+                for old_pair in zip(old_token, old_token[1:]):
+                    pair_counts[old_pair] -= old_token_freq
+                    pair_to_token_keys[old_pair].discard(old_token)
+
+                for new_pair in zip(new_token, new_token[1:]):
+                    pair_counts[new_pair] += old_token_freq
+                    pair_to_token_keys[new_pair].add(tuple(new_token))
+            # clean up old pair to pre-token mapping
+            pair_to_token_keys.pop(merge_pair)
 
         return vocab, merges
 
