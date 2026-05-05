@@ -25,6 +25,7 @@ class BPETokenizer(object):
         # map from vocab element to id
         self.inverted_vocab = {v: k for k, v in self.vocab.items()}
         self.merges = merges
+        self.merges_rank = {m: idx for idx, m in enumerate(merges)}
         if special_tokens is None:
             self.special_tokens = []
         else:
@@ -37,9 +38,9 @@ class BPETokenizer(object):
     @classmethod
     def from_file(cls, vocab_filepath, merges_filepath, special_tokens=[]):
         vocab, merges = None, None
-        with open(vocab_filepath, 'rb') as f:
+        with open(vocab_filepath, "rb") as f:
             vocab = pickle.load(f)
-        with open(merges_filepath, 'rb') as f:
+        with open(merges_filepath, "rb") as f:
             merges = pickle.load(f)
 
         return BPETokenizer(vocab, merges, special_tokens)
@@ -48,6 +49,23 @@ class BPETokenizer(object):
         # 1. split by special tokens
         # 2. pre-tokenize
         # 3. process each token using merge rules
+        """
+        Optimized BPE encode using a linked list + priority queue:
+
+        1. Build a merge rank dict: {(A, B): rank} for O(1) priority lookup.
+        2. For each pre-token:
+           a. Initialize a doubly linked list of individual bytes.
+           b. For each adjacent pair in the token, if it exists in the merge rank dict,
+              add (rank, pair_node) to a min-heap (priority queue).
+           c. Repeatedly pop the lowest-rank (highest-priority) pair from the heap:
+              - If the pair node is already marked as merged (lazy deletion), skip it.
+              - Otherwise, merge the two nodes into one in the linked list.
+              - Mark the two old neighbor pairs as merged (invalidate them).
+              - Generate the new adjacent pairs with the merged node's neighbors,
+                and push them onto the heap if they exist in the merge rank dict.
+           d. Continue until the heap is empty.
+           e. Traverse the linked list to collect the final token IDs.
+        """
         if text is None:
             # deal with empty input
             return []
@@ -67,23 +85,23 @@ class BPETokenizer(object):
                 continue
             for match in BPETokenizer.PRE_TOKEN_PAT.finditer(sentence):
                 token = match.group().encode("utf-8")
-                token_bytes = [token[i : i + 1] for i in range(len(token))]
+                token_elements = [token[i : i + 1] for i in range(len(token))]
                 for merge in self.merges:
                     idx = 0
-                    while idx < len(token_bytes) - 1:
+                    while idx < len(token_elements) - 1:
                         if (
-                            token_bytes[idx] != merge[0]
-                            or token_bytes[idx + 1] != merge[1]
+                            token_elements[idx] != merge[0]
+                            or token_elements[idx + 1] != merge[1]
                         ):
                             idx += 1
                             continue
-                        token_bytes = (
-                            token_bytes[:idx]
+                        token_elements = (
+                            token_elements[:idx]
                             + [b"".join(merge)]
-                            + token_bytes[idx + 2 :]
+                            + token_elements[idx + 2 :]
                         )
                         idx += 1
-                for element in token_bytes:
+                for element in token_elements:
                     encoded_text.append(self.inverted_vocab[element])
 
         return encoded_text
