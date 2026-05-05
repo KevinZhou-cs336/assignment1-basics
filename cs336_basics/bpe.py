@@ -129,7 +129,7 @@ class BPETokenizer(object):
                 continue
 
             cur_pair = (cur_node.val, right_node.val)
-            if b''.join(cur_pair) != b''.join(existing_pair):
+            if cur_pair != existing_pair:
                 continue
 
             # merge cur node and the right node since we are merged these two individual bytes
