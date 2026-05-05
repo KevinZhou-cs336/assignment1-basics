@@ -18,7 +18,7 @@ class BPETokenizer(object):
         self,
         vocab: dict[int, bytes],
         merges: list[tuple[bytes, bytes]],
-        special_tokens: list[str] = [],
+        special_tokens: list[str] = None,
     ):
         self.num_cores = multiprocessing.cpu_count() - 1
         self.vocab = vocab
@@ -48,6 +48,9 @@ class BPETokenizer(object):
         # 1. split by special tokens
         # 2. pre-tokenize
         # 3. process each token using merge rules
+        if text is None:
+            # deal with empty input
+            return []
         if len(self.special_tokens) != 0:
             special_tokens_pattern = (
                 "(" + "|".join([re.escape(t) for t in self.special_tokens]) + ")"
