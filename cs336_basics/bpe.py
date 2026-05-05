@@ -1,11 +1,36 @@
+from __future__ import annotations
+from typing import Counter, Iterable
+
 import collections
+import heapq
 import pickle
 import regex as re
 import multiprocessing
 from functools import partial
 
-from typing import Counter, Iterable
 from cs336_basics.pretokenization_example import find_chunk_boundaries
+
+
+class IndividualBytes(object):
+    def __init__(
+        self,
+        idx: int,
+        val: bytes,
+        prev: IndividualBytes = None,
+        next: IndividualBytes = None,
+        merged: bool = False,
+    ):
+        self.idx = idx
+        self.val = val
+        self.prev = prev
+        self.next = next
+        self._merged = merged
+
+    def merge(self):
+        self._merged = True
+
+    def is_merged(self):
+        return self._merged
 
 
 class BPETokenizer(object):
@@ -84,27 +109,92 @@ class BPETokenizer(object):
                 encoded_text.append(self.inverted_vocab[sentence.encode("utf-8")])
                 continue
             for match in BPETokenizer.PRE_TOKEN_PAT.finditer(sentence):
-                token = match.group().encode("utf-8")
-                token_elements = [token[i : i + 1] for i in range(len(token))]
-                for merge in self.merges:
-                    idx = 0
-                    while idx < len(token_elements) - 1:
-                        if (
-                            token_elements[idx] != merge[0]
-                            or token_elements[idx + 1] != merge[1]
-                        ):
-                            idx += 1
-                            continue
-                        token_elements = (
-                            token_elements[:idx]
-                            + [b"".join(merge)]
-                            + token_elements[idx + 2 :]
-                        )
-                        idx += 1
-                for element in token_elements:
-                    encoded_text.append(self.inverted_vocab[element])
+                encoded_token = self._encode_single_token(match)
+                encoded_text.extend(encoded_token)
 
         return encoded_text
+
+    def _encode_single_token(self, token: str) -> list[int]:
+        token = token.group().encode("utf-8")
+        head, _ = self._build_linked_individual_bytes_from_token(token)
+        # merge queue doesn't contain the head, tail sentinel node
+        merge_queue = self._initialize_token_merge_queue(head)
+
+        while merge_queue:
+            _, _, existing_pair, cur_node = heapq.heappop(merge_queue)
+            left_node = cur_node.prev
+            right_node = cur_node.next
+            # current node or right node is already merged, this is an obsolete merge pair
+            if cur_node.is_merged() or right_node.is_merged():
+                continue
+
+            cur_pair = (cur_node.val, right_node.val)
+            if b''.join(cur_pair) != b''.join(existing_pair):
+                continue
+
+            # merge cur node and the right node since we are merged these two individual bytes
+            right_node.merge()
+            merged_elem = b"".join(cur_pair)
+            cur_node.val = merged_elem
+            right_node = right_node.next
+            cur_node.next = right_node
+            right_node.prev = cur_node
+            right_pair = (merged_elem, right_node.val)
+            if not right_node.is_merged() and right_pair in self.merges_rank:
+                heapq.heappush(
+                    merge_queue,
+                    (self.merges_rank[right_pair], cur_node.idx, right_pair, cur_node),
+                )
+            left_pair = (left_node.val, merged_elem)
+            if not left_node.is_merged() and left_pair in self.merges_rank:
+                heapq.heappush(
+                    merge_queue,
+                    (self.merges_rank[left_pair], left_node.idx, left_pair, left_node),
+                )
+
+        encoded_token = []
+        # start from non-sentinel(head) pair
+        cur = head
+        while cur:
+            if cur.is_merged():
+                cur = cur.next
+                continue
+            encoded_token.append(self.inverted_vocab[cur.val])
+            cur = cur.next
+
+        return encoded_token
+
+    def _build_linked_individual_bytes_from_token(
+        self, token: bytes
+    ) -> tuple[IndividualBytes, IndividualBytes]:
+        head, tail = IndividualBytes(-1, b"", merged=True), IndividualBytes(
+            -1, b"", merged=True
+        )
+        token_elements = [token[i : i + 1] for i in range(len(token))]
+        cur_pair = head
+        for idx, element in enumerate(token_elements):
+            new_pair = IndividualBytes(idx, element)
+            cur_pair.next = new_pair
+            new_pair.prev = cur_pair
+            cur_pair = new_pair
+        cur_pair.next = tail
+        tail.prev = cur_pair
+
+        return head, tail
+
+    def _initialize_token_merge_queue(self, cur: IndividualBytes) -> IndividualBytes:
+        heap = []
+        # skip the head sentinel pair
+        cur = cur.next
+        while cur.next and cur.next.next:
+            cur_pair = (cur.val, cur.next.val)
+            if cur_pair not in self.merges_rank:
+                cur = cur.next
+                continue
+            heapq.heappush(heap, (self.merges_rank[cur_pair], cur.idx, cur_pair, cur))
+            cur = cur.next
+
+        return heap
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
         for element in iterable:
