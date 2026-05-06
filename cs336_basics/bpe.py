@@ -61,8 +61,9 @@ class BPETokenizer(object):
         self.special_tokens_set = set(self.special_tokens)
 
     @classmethod
-    def from_file(cls, vocab_filepath, merges_filepath, special_tokens=[]):
-        vocab, merges = None, None
+    def from_file(
+        cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] = None
+    ):
         with open(vocab_filepath, "rb") as f:
             vocab = pickle.load(f)
         with open(merges_filepath, "rb") as f:
@@ -71,9 +72,6 @@ class BPETokenizer(object):
         return BPETokenizer(vocab, merges, special_tokens)
 
     def encode(self, text: str) -> list[int]:
-        # 1. split by special tokens
-        # 2. pre-tokenize
-        # 3. process each token using merge rules
         """
         Optimized BPE encode using a linked list + priority queue:
 
@@ -109,14 +107,14 @@ class BPETokenizer(object):
                 encoded_text.append(self.inverted_vocab[sentence.encode("utf-8")])
                 continue
             for match in BPETokenizer.PRE_TOKEN_PAT.finditer(sentence):
-                encoded_token = self._encode_single_token(match)
+                encoded_token = self._encode_single_token(match.group())
                 encoded_text.extend(encoded_token)
 
         return encoded_text
 
     def _encode_single_token(self, token: str) -> list[int]:
-        token = token.group().encode("utf-8")
-        head, _ = self._build_linked_individual_bytes_from_token(token)
+        token_bytes = token.encode("utf-8")
+        head, _ = self._build_linked_individual_bytes_from_token(token_bytes)
         # merge queue doesn't contain the head, tail sentinel node
         merge_queue = self._initialize_token_merge_queue(head)
 
@@ -171,14 +169,14 @@ class BPETokenizer(object):
             -1, b"", merged=True
         )
         token_elements = [token[i : i + 1] for i in range(len(token))]
-        cur_pair = head
+        cur_node = head
         for idx, element in enumerate(token_elements):
-            new_pair = IndividualBytes(idx, element)
-            cur_pair.next = new_pair
-            new_pair.prev = cur_pair
-            cur_pair = new_pair
-        cur_pair.next = tail
-        tail.prev = cur_pair
+            new_node = IndividualBytes(idx, element)
+            cur_node.next = new_node
+            new_node.prev = cur_node
+            cur_node = new_node
+        cur_node.next = tail
+        tail.prev = cur_node
 
         return head, tail
 
@@ -186,7 +184,7 @@ class BPETokenizer(object):
         heap = []
         # skip the head sentinel pair
         cur = cur.next
-        while cur.next and cur.next.next:
+        while not cur.next.is_merged():
             cur_pair = (cur.val, cur.next.val)
             if cur_pair not in self.merges_rank:
                 cur = cur.next
@@ -213,7 +211,6 @@ class BPETokenizer(object):
         # Run pre-tokenization on your chunk and store the counts for each pre-token
         partial_func = partial(self._pre_tokenize_chunk, special_tokens=special_tokens)
         # counts represent result from pre-tokenization for all chunks
-        counts = {}
         with multiprocessing.Pool(processes=self.num_cores) as pool:
             counts = pool.map(partial_func, chunks)
 
@@ -222,7 +219,7 @@ class BPETokenizer(object):
         for count in counts:
             tokenized_results += count
 
-        return self.process_bpe_merge(vocab_size, special_tokens, tokenized_results)
+        return self._process_bpe_merge(vocab_size, special_tokens, tokenized_results)
 
     def _split_file_to_chunks(self, input_path: str) -> list[str]:
         with open(input_path, "rb") as f:
@@ -235,7 +232,7 @@ class BPETokenizer(object):
 
             return chunks
 
-    def process_bpe_merge(
+    def _process_bpe_merge(
         self, vocab_size: int, special_tokens: list[str], tokenized_results: Counter
     ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         vocab = {
@@ -270,7 +267,7 @@ class BPETokenizer(object):
                 new_token = []
                 old_token_freq = tokenized_results.pop(tuple(old_token))
                 i = 0
-                while i <= len(old_token) - 1:
+                while i < len(old_token):
                     if (
                         i < len(old_token) - 1
                         and old_token[i] == merge_pair[0]
@@ -299,17 +296,16 @@ class BPETokenizer(object):
 
         return vocab, merges
 
-    def _pre_tokenize_chunk(self, token: str, special_tokens: list[str]) -> Counter:
+    def _pre_tokenize_chunk(self, text_chunk: str, special_tokens: list[str]) -> Counter:
         special_tokens_pattern = "|".join([re.escape(t) for t in special_tokens])
 
         counts = Counter()
-        chunks = re.split(special_tokens_pattern, token)
+        chunks = re.split(special_tokens_pattern, text_chunk)
         for chunk in chunks:
             for match in BPETokenizer.PRE_TOKEN_PAT.finditer(chunk):
-                token = match.group().encode("utf-8")
-                res = []
-                # convert b'how' to b'h, b'o', b'w'
-                res = tuple([token[i : i + 1] for i in range(len(token))])
+                token_bytes = match.group().encode("utf-8")
+                # convert b'how' to (b'h', b'o', b'w')
+                res = tuple([token_bytes[i : i + 1] for i in range(len(token_bytes))])
                 counts[res] += 1
 
         return counts
