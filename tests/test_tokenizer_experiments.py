@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from cs336_basics.bpe import BPETokenizer
+from cs336_basics.bpe.bpe import BPETokenizer
 
 DATA_PATH = (pathlib.Path(__file__).resolve().parent) / ".." / "data"
 
