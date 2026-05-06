@@ -8,7 +8,7 @@ import regex as re
 import multiprocessing
 from functools import partial
 
-from cs336_basics.pretokenization_example import find_chunk_boundaries
+from cs336_basics.bpe.pretokenization_example import find_chunk_boundaries
 
 
 class IndividualBytes(object):
