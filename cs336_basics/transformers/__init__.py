@@ -1,3 +1,4 @@
 from .embedding import Embedding
 from .linear import Linear
-from .RMSNorm import RMSNorm
+from .rms_norm import RMSNorm
+from .positionwise_feedforward import SwiGLUFeedForwardNetwork
