@@ -32,7 +32,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"weights": weights})
+
+    return linear.forward(in_features)
 
 
 def run_embedding(
@@ -53,8 +56,10 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_state_dict({"embedding_matrices": weights})
 
-    raise NotImplementedError
+    return embedding.forward(token_ids)
 
 
 def run_swiglu(
@@ -458,7 +463,9 @@ def run_cross_entropy(
     raise NotImplementedError
 
 
-def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+def run_gradient_clipping(
+    parameters: Iterable[torch.nn.Parameter], max_l2_norm: float
+) -> None:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
 
     Args:
@@ -598,5 +605,5 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     bpeTokenizer = BPETokenizer({}, [])
-    
+
     return bpeTokenizer.train_bpe(input_path, vocab_size, special_tokens)
