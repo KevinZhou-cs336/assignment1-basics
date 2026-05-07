@@ -21,9 +21,8 @@ class RMSNorm(torch.nn.Module):
         in_dtype = x.dtype
         x = x.to(torch.float32)
 
-        # input dims (batch_size, seq_length, d_model) , we are only calculating along side the d_model
-        # which means for every token in the sequence, we are calculating the value for d_model parameters
-        # for the token only
+        # input: (batch_size, seq_length, d_model); normalize along d_model (dim=-1)
+        # so each token in the sequence is normalized independently
         rms_x = torch.sqrt(
             torch.pow(x, 2).sum(dim=-1, keepdim=True) / self.d_model + self.eps
         )
