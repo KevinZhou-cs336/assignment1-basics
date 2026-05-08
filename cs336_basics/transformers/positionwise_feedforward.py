@@ -5,6 +5,19 @@ class SwiGLUFeedForwardNetwork(torch.nn.Module):
     def __init__(
         self,
         d_model: int,
+
+
+
+
+
+
+
+
+
+
+
+
+         
         d_ff: int,
         device: torch.device = None,
         dtype: torch.dtype = None,
