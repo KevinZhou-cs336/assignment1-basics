@@ -2,6 +2,23 @@ import torch
 
 
 class RotaryPositionalEmbedding(torch.nn.Module):
+    """Rotary Positional Embedding (RoPE) — Su et al., 2021.
+
+    Encodes absolute position implicitly by rotating Q and K vectors; their dot product
+    then depends only on the *relative* position offset between query and key tokens.
+
+    Each dimension pair (x_{2k}, x_{2k+1}) is rotated by angle θ_{i,k} = i / Θ^(2k/d_k),
+    where i is the token position and Θ (theta) is the base frequency.
+
+    Sin/cos lookup tables are pre-computed at init from (theta, d_k, max_seq_len) and
+    are NOT saved to checkpoints (persistent=False) since they are fully re-derivable.
+
+    Args:
+        theta:       Base frequency Θ; lower-index dim-pairs rotate faster.
+        d_k:         Head embedding dimension (= d_model // num_heads); must be even.
+        max_seq_len: Maximum sequence length; sets the size of pre-computed tables.
+    """
+
     def __init__(
         self, theta: float, d_k: int, max_seq_len: int, device: torch.device = None
     ):
@@ -13,8 +30,8 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         self.max_seq_len = max_seq_len
         self.device = device
 
-        # Pre-computed sin/cos tables; not saved to checkpoint (derivable from theta/d_k/max_seq_len)
-        # sin_matrices, cos_matrices: (max_seq_len, d_k // 2)
+        # Pre-computed lookup tables: shape (max_seq_len, d_k/2)
+        # Not saved to checkpoint (persistent=False) — re-derived from hyperparams at load time
         self.register_buffer(
             "sin_matrices", torch.zeros(max_seq_len, d_k // 2), persistent=False
         )
@@ -27,50 +44,52 @@ class RotaryPositionalEmbedding(torch.nn.Module):
 
     def _build_rotary_position_matrices(
         self, theta: float, d_k: int, max_seq_len: int
-    ) -> torch.Tensor:
-        # Position indices: (max_seq_len, 1)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # i_matrices: absolute position indices, shape (max_seq_len, 1)
+        # unsqueeze(1) prepares for broadcasting against the (1, d_k/2) frequency vector
         i_matrices = torch.arange(0, max_seq_len).unsqueeze(1)
 
-        # Frequency for each dimension pair k: theta^(2k / d_k), k in [0, d_k/2 - 1]
-        # torch.arange(0, d_k, 2) / d_k: (d_k/2,)  -> unsqueeze -> (1, d_k/2)
-        # angle[i, k] = i / theta^(2k/d_k)  = position i × frequency k
-        # theta_matrices: (max_seq_len, d_k/2)
+        # Build rotation angles: theta_matrices[i, k] = i / Θ^(2k/d_k)
+        #   torch.arange(0, d_k, 2) / d_k  → (d_k/2,)  exponents 0, 2/d_k, 4/d_k, ...
+        #   torch.pow(theta, ...)           → (d_k/2,)  denominators Θ^0, Θ^(2/d_k), ...
+        #   .unsqueeze(0)                   → (1, d_k/2) for broadcasting with i_matrices
+        #   i_matrices / ...               → (max_seq_len, d_k/2)  angle for each (pos, dim-pair)
         theta_matrices = i_matrices / torch.pow(
             theta, torch.arange(0, d_k, 2) / d_k
         ).unsqueeze(0)
 
         # sin_matrices, cos_matrices: (max_seq_len, d_k/2)
-        sin_matrices = torch.sin(theta_matrices)
-        cos_matrices = torch.cos(theta_matrices)
-
-        return sin_matrices, cos_matrices
+        return torch.sin(theta_matrices), torch.cos(theta_matrices)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        # x:               (..., seq_len, d_k)
-        # token_positions: (seq_len,) or (..., seq_len)
+        # x:               (..., seq_len, d_k)  — Q or K; num_heads treated as a batch dim
+        # token_positions: (seq_len,) or (..., seq_len)  — absolute position of each token
 
-        # Split x into even-indexed and odd-indexed dimensions along last axis
-        # x_even_pos, x_odd_pos: (..., seq_len, d_k/2)
+        # Step 1: Split last dim into even- and odd-indexed dimensions
+        # x_even_pos: (..., seq_len, d_k/2)  — dims 0, 2, 4, ...  (x_{2k})
+        # x_odd_pos:  (..., seq_len, d_k/2)  — dims 1, 3, 5, ...  (x_{2k+1})
         x_even_pos = x[..., 0::2]
         x_odd_pos = x[..., 1::2]
 
-        # Look up pre-computed sin/cos for the given positions
-        # sin_matrices[token_positions]: (..., seq_len, d_k/2)  (index broadcasts over leading dims)
+        # Step 2: Look up pre-computed sin/cos for the requested token positions
+        # Advanced indexing with token_positions broadcasts over all leading (...) dims
+        # sin_matrices, cos_matrices: (..., seq_len, d_k/2)
         sin_matrices = self.sin_matrices[token_positions]
         cos_matrices = self.cos_matrices[token_positions]
 
-        # Apply 2D rotation to each (x_{2k}, x_{2k+1}) pair:
-        # x_new[2k]   = x[2k]   * cos(θ_{i,k}) - x[2k+1] * sin(θ_{i,k})
-        # x_new[2k+1] = x[2k]   * sin(θ_{i,k}) + x[2k+1] * cos(θ_{i,k})
+        # Step 3: Apply 2D rotation to each dimension pair (x_{2k}, x_{2k+1}):
+        #   rotated_{2k}   = x_{2k}   * cos(θ_{i,k}) - x_{2k+1} * sin(θ_{i,k})
+        #   rotated_{2k+1} = x_{2k}   * sin(θ_{i,k}) + x_{2k+1} * cos(θ_{i,k})
         # positional_x_even, positional_x_odd: (..., seq_len, d_k/2)
         positional_x_even = x_even_pos * cos_matrices - x_odd_pos * sin_matrices
         positional_x_odd = x_even_pos * sin_matrices + x_odd_pos * cos_matrices
 
-        # Interleave even and odd back: stack along new last dim then flatten
-        # stack -> (..., seq_len, d_k/2, 2)
-        # reshape -> (..., seq_len, d_k)  with order [even_0, odd_0, even_1, odd_1, ...]
+        # Step 4: Interleave even and odd results back into original shape
+        # stack([even, odd], dim=-1) → (..., seq_len, d_k/2, 2)
+        #   pairs as [[rotated_0, rotated_1], [rotated_2, rotated_3], ...]
+        # reshape → (..., seq_len, d_k)  restores original shape with rotated values
         stacked_positional_x = torch.stack(
             [positional_x_even, positional_x_odd], dim=-1
         )
-
+        # output: (..., seq_len, d_k)
         return torch.reshape(stacked_positional_x, (*x.shape[:-1], -1))

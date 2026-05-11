@@ -12,9 +12,10 @@ class Linear(torch.nn.Module):
         dtype: torch.dtype = None,
     ):
         super().__init__()
-        # Row-majoring matrix d_out * d_in
         self.device = device
         self.dtype = dtype
+        # weight stored row-major: (out_features, in_features)
+        # Glorot-style truncated normal init: std = sqrt(2 / (in + out)), clipped at ±3σ
         self.weight = torch.nn.Parameter(torch.randn(out_features, in_features))
         std = math.sqrt(2 / (out_features + in_features))
         torch.nn.init.trunc_normal_(
@@ -22,4 +23,7 @@ class Linear(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x:      (..., in_features)   — arbitrary leading batch/sequence dims
+        # weight: (out_features, in_features)  indices ji
+        # einsum contracts over i (in_features), producing (..., out_features)
         return torch.einsum("...i,ji->...j", x, self.weight)
