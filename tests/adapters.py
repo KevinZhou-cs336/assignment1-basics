@@ -166,16 +166,10 @@ def run_multihead_self_attention(
     multihead_attention = MultiHeadSelfAttention(d_model, num_heads)
     multihead_attention.load_state_dict(
         {
-            "q_weights": q_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "k_weights": k_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "v_weights": v_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "o_weights": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )
 
@@ -223,16 +217,10 @@ def run_multihead_self_attention_with_rope(
     multihead_attention = MultiHeadSelfAttention(d_model, num_heads, rope)
     multihead_attention.load_state_dict(
         {
-            "q_weights": q_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "k_weights": k_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "v_weights": v_proj_weight.reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "o_weights": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
         }
     )
 
@@ -334,41 +322,21 @@ def run_transformer_block(
         running the Transformer block on the input features while using RoPE.
     """
 
+    # transfomer block
     # layer 1 (rms norm + multihead attention) + original input
     rms_norm_mha = RMSNorm(d_model)
-    rms_norm_mha.load_state_dict({"gain": weights["ln1.weight"]})
     rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len)
     multihead_attention = MultiHeadSelfAttention(d_model, num_heads, rope)
-    multihead_attention.load_state_dict(
-        {
-            "q_weights": weights["attn.q_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "k_weights": weights["attn.k_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "v_weights": weights["attn.v_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "o_weights": weights["attn.output_proj.weight"],
-        }
-    )
 
     # layer 2 (rms norm + position wise ffn) + layer1 input
     rms_norm_ffn = RMSNorm(d_model)
-    rms_norm_ffn.load_state_dict({"gain": weights["ln2.weight"]})
     swiglu_ffn = SwiGLUFeedForwardNetwork(d_model, d_ff)
-    swiglu_ffn.load_state_dict(
-        {
-            "w1_weights": weights["ffn.w1.weight"],
-            "w2_weights": weights["ffn.w2.weight"],
-            "w3_weights": weights["ffn.w3.weight"],
-        }
-    )
 
     transform_block = TransformerBlock(
-        rope, multihead_attention, swiglu_ffn, rms_norm_mha, rms_norm_ffn
+        multihead_attention, swiglu_ffn, rms_norm_mha, rms_norm_ffn
     )
+
+    transform_block.load_state_dict(weights)
 
     return transform_block.forward(in_features)
 
@@ -452,7 +420,40 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    rms_norm_mha = RMSNorm(d_model)
+    rms_norm_mha.load_state_dict(weights)
+    rope = RotaryPositionalEmbedding(rope_theta, d_model // num_heads, context_length)
+    multihead_attention = MultiHeadSelfAttention(d_model, num_heads, rope)
+    multihead_attention.load_state_dict(
+        {
+            "q_weights": weights["attn.q_proj.weight"].reshape(
+                num_heads, d_model // num_heads, d_model
+            ),
+            "k_weights": weights["attn.k_proj.weight"].reshape(
+                num_heads, d_model // num_heads, d_model
+            ),
+            "v_weights": weights["attn.v_proj.weight"].reshape(
+                num_heads, d_model // num_heads, d_model
+            ),
+            "o_weights": weights["attn.output_proj.weight"],
+        }
+    )
+
+    # layer 2 (rms norm + position wise ffn) + layer1 input
+    rms_norm_ffn = RMSNorm(d_model)
+    rms_norm_ffn.load_state_dict({"gain": weights["ln2.weight"]})
+    swiglu_ffn = SwiGLUFeedForwardNetwork(d_model, d_ff)
+    swiglu_ffn.load_state_dict(
+        {
+            "w1_weights": weights["ffn.w1.weight"],
+            "w2_weights": weights["ffn.w2.weight"],
+            "w3_weights": weights["ffn.w3.weight"],
+        }
+    )
+    transform_block = TransformerBlock(
+        multihead_attention, swiglu_ffn, rms_norm_mha, rms_norm_ffn
+    )
+    print(transform_block.state_dict().keys())
 
 
 def run_rmsnorm(
