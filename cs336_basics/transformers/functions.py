@@ -79,12 +79,33 @@ def scaled_dot_product_attention(
         receives a weighted sum of value vectors, where the weights are the
         softmax-normalized, scale-adjusted dot products with the keys.
     """
+    # Step 1: Compute raw attention scores Q K^T
+    # einsum "...qj,...kj->...qk":
+    #   query: (..., seq_len_q, d_k)  indices ...qj
+    #   key:   (..., seq_len_k, d_k)  indices ...kj  (shared j=d_k contracts)
+    #   → (..., seq_len_q, seq_len_k)  score[..., q, k] = dot(query[q], key[k])
     query_key = torch.einsum("...qj,...kj->...qk", query, key)
+
+    # Step 2: Scale by 1/sqrt(d_k) to prevent dot products from growing large
+    # (large values push softmax into near-zero gradient regions)
+    # query_key: (..., seq_len_q, seq_len_k)  unchanged shape
     d_k = query.shape[-1]
     qk_d_k = query_key / math.sqrt(d_k)
-    # If position in mask tensor is true, use the value
-    # to repalce original value in the sam position in tenso
-    qk_d_k = qk_d_k.masked_fill(mask == False, float('-inf'))
+
+    # Step 3: Apply causal mask — set forbidden positions to -inf before softmax
+    # mask[i, j] == True → query i may attend to key j (keep score)
+    # mask[i, j] == False → query i blocked from key j → score → -inf → weight → 0
+    # qk_d_k: (..., seq_len_q, seq_len_k)  unchanged shape
+    if mask is not None:
+        qk_d_k = qk_d_k.masked_fill(mask == False, float('-inf'))
+
+    # Step 4: Softmax over the key axis — each query gets a probability distribution over keys
+    # softmax_qk: (..., seq_len_q, seq_len_k)  rows sum to 1
     softmax_qk = softmax(qk_d_k, -1)
 
+    # Step 5: Weighted sum of value vectors
+    # einsum "...nm,...mv->...nv":
+    #   softmax_qk: (..., seq_len_q, seq_len_k)  indices ...nm  (n=seq_len_q, m=seq_len_k)
+    #   value:      (..., seq_len_k, d_v)         indices ...mv  (m=seq_len_k contracts, v=d_v)
+    #   → (..., seq_len_q, d_v)  output[..., q, :] = weighted sum of value rows
     return torch.einsum("...nm,...mv->...nv", softmax_qk, value)

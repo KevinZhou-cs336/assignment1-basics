@@ -17,5 +17,8 @@ class Embedding(torch.nn.Module):
         self.device = device
         self.dtype = dtype
 
-    def forward(self, token_ids: torch.Tensor)->torch.Tensor:
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        # token_ids:        (...)  integer indices in [0, num_embeddings)
+        # embedding_matrix: (num_embeddings, embedding_dim)
+        # output:           (..., embedding_dim)  — each ID replaced by its embedding row
         return self.embedding_matrix[token_ids]
