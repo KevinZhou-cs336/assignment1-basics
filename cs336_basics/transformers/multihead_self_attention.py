@@ -21,8 +21,9 @@ class MultiHeadSelfAttention(torch.nn.Module):
             → transpose + reshape → (B, T, D)       merged heads
             → output projection → (B, T, D)         final output
 
-    State dict keys: attn.q_proj.weight, attn.k_proj.weight,
-                     attn.v_proj.weight, attn.output_proj.weight  — each (D, D)
+    State dict keys (within this module): q_proj.weight, k_proj.weight,
+        v_proj.weight, output_proj.weight  — each (D, D).
+    When nested inside TransformerBlock as self.attn, these become attn.q_proj.weight, etc.
     """
 
     def __init__(
