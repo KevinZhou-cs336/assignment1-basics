@@ -101,7 +101,11 @@ def run_swiglu(
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
     swiglu = SwiGLUFeedForwardNetwork(d_model, d_ff)
-    weights = {"w1_weight": w1_weight, "w2_weight": w2_weight, "w3_weight": w3_weight}
+    weights = {
+        "w1_weights": w1_weight,
+        "w2_weights": w2_weight,
+        "w3_weights": w3_weight,
+    }
     swiglu.load_state_dict(weights)
 
     return swiglu.forward(in_features)

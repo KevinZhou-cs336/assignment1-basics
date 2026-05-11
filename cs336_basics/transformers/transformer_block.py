@@ -6,7 +6,7 @@ from cs336_basics.transformers.rms_norm import RMSNorm
 from cs336_basics.transformers.rope import RotaryPositionalEmbedding
 
 
-class TransformerBlock:
+class TransformerBlock(torch.nn.Module):
     """Pre-norm Transformer block (Nguyen & Salazar, 2019; Xiong et al., 2020).
 
     Each block applies two sub-layers with residual connections:
@@ -29,6 +29,8 @@ class TransformerBlock:
         rms_norm_mha: RMSNorm,
         rms_norm_ffn: RMSNorm,
     ):
+        super().__init__()
+        
         self.rope = rope
         self.rms_norm_mha = rms_norm_mha
         self.mha = mha
@@ -44,9 +46,11 @@ class TransformerBlock:
         l1_output = self.rms_norm_mha.forward(in_features)
 
         # Step 1b: Multi-Head Self-Attention (with RoPE applied inside MHA)
-        #   token_positions = [0, 1, ..., seq_len-1] for standard sequential decoding
+        #   token_positions: (seq_len,) = [0, 1, ..., seq_len-1], created on the same
+        #   device as in_features to avoid device mismatch when indexing RoPE sin/cos tables
         #   (batch, seq_len, d_model) -> (batch, seq_len, d_model)
-        l1_output = self.mha.forward(l1_output, torch.arange(in_features.shape[-2]))
+        token_positions = torch.arange(in_features.shape[-2], device=in_features.device)
+        l1_output = self.mha.forward(l1_output, token_positions)
 
         # Step 1c: Residual connection — y = x + MHA(RMSNorm(x))
         #   (batch, seq_len, d_model)
