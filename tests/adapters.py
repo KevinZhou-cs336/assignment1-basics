@@ -18,7 +18,8 @@ from cs336_basics.transformers import (
     RotaryPositionalEmbedding,
 )
 from cs336_basics.transformers.transformer_block import TransformerBlock
-from cs336_basics.transformers.functions import cross_entropy, scaled_dot_product_attention, softmax
+from cs336_basics.transformers.functions import scaled_dot_product_attention, softmax
+from cs336_basics.training import cross_entropy
 from cs336_basics.transformers.multihead_self_attention import MultiHeadSelfAttention
 from cs336_basics.transformers.transformer_language_model import (
     TransformerLanguageModel,
