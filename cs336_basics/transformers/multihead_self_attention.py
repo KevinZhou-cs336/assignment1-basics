@@ -15,11 +15,12 @@ class MultiHeadSelfAttention(torch.nn.Module):
         self.d_head = d_model // num_heads  # d_k = d_v = d_model / num_heads
         self.rope = rope
 
-        # Reshape flat projection weights into per-head view
-        # (d_model, d_model) -> (num_heads, d_head, d_model)
+        # Q/K/V projection weights stored per-head: (num_heads, d_head, d_model)
+        # Equivalent to a flat (d_model, d_model) matrix split across heads
         self.q_weights = torch.nn.Parameter(torch.randn(d_model * d_model).reshape((num_heads, self.d_head, d_model)))
         self.k_weights = torch.nn.Parameter(torch.randn(d_model * d_model).reshape((num_heads, self.d_head, d_model)))
         self.v_weights = torch.nn.Parameter(torch.randn(d_model * d_model).reshape((num_heads, self.d_head, d_model)))
+        # Output projection weight: (d_model, d_model), maps concatenated heads back to d_model
         self.o_weights = torch.nn.Parameter(torch.randn(d_model * d_model).reshape((d_model, d_model)))
 
     def forward(
@@ -35,7 +36,7 @@ class MultiHeadSelfAttention(torch.nn.Module):
         k_x = torch.einsum("...xj, nhj->...nxh", in_features, self.k_weights)
         v_x = torch.einsum("...xj, nhj->...nxh", in_features, self.v_weights)
 
-        # Apply RoPE to Q and K (not V); token_position: (seq_len,)
+        # Apply RoPE to Q and K (not V); token_positions: (..., seq_len)
         # RoPE treats num_heads as a batch dimension, shape preserved: (..., num_heads, seq_len, d_head)
         if self.rope:
             q_x = self.rope.forward(q_x, token_positions)
