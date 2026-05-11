@@ -27,10 +27,10 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         self, theta: float, d_k: int, max_seq_len: int
     ) -> torch.Tensor:
         # token pos matrix , dimension(max_seq, 1)
-        i_matrices = torch.arange(0, self.max_seq_len).unsqueeze(1)
+        i_matrices = torch.arange(0, max_seq_len).unsqueeze(1)
         # theta matrix , dimension(1, d_k / 2) i * 1 / theta^(2k/d) whee k in [0, d/2 -1]
         theta_matrices = i_matrices / torch.pow(
-            self.theta, torch.arange(0, self.d_k, 2) / self.d_k
+            theta, torch.arange(0, d_k, 2) / d_k
         ).unsqueeze(0)
         # sin_matix, dimension (max_seq, d_/2)
         sin_matrices = torch.sin(theta_matrices)
@@ -55,7 +55,6 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # x_i even [0 2 4 ...]
         # x_i odd  [1 3 5 ...]
         # stack_x [[0, 1], [2, 3], [4, 5]]
-
         stacked_positional_x = torch.stack(
             [positional_x_even, positional_x_odd], dim=-1
         )

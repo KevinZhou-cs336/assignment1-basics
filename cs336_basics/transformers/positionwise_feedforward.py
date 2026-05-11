@@ -5,19 +5,6 @@ class SwiGLUFeedForwardNetwork(torch.nn.Module):
     def __init__(
         self,
         d_model: int,
-
-
-
-
-
-
-
-
-
-
-
-
-         
         d_ff: int,
         device: torch.device = None,
         dtype: torch.dtype = None,
@@ -29,7 +16,6 @@ class SwiGLUFeedForwardNetwork(torch.nn.Module):
         self.w1_weight = torch.nn.Parameter(torch.randn(self.d_ff, self.d_model))
         self.w2_weight = torch.nn.Parameter(torch.randn(self.d_model, self.d_ff))
         self.w3_weight = torch.nn.Parameter(torch.randn(self.d_ff, self.d_model))
-
         self.device = device
         self.dtype = dtype
 
