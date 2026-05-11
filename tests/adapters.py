@@ -20,6 +20,9 @@ from cs336_basics.transformers import (
 from cs336_basics.transformers.transformer_block import TransformerBlock
 from cs336_basics.transformers.functions import scaled_dot_product_attention, softmax
 from cs336_basics.transformers.multihead_self_attention import MultiHeadSelfAttention
+from cs336_basics.transformers.transformer_language_model import (
+    TransformerLanguageModel,
+)
 
 
 def run_linear(
@@ -42,7 +45,7 @@ def run_linear(
     """
 
     linear = Linear(d_in, d_out)
-    linear.load_state_dict({"weights": weights})
+    linear.load_state_dict({"weight": weights})
 
     return linear.forward(in_features)
 
@@ -102,9 +105,9 @@ def run_swiglu(
     # swiglu.w3.weight.data = w3_weight
     swiglu = SwiGLUFeedForwardNetwork(d_model, d_ff)
     weights = {
-        "w1_weights": w1_weight,
-        "w2_weights": w2_weight,
-        "w3_weights": w3_weight,
+        "w1.weight": w1_weight,
+        "w2.weight": w2_weight,
+        "w3.weight": w3_weight,
     }
     swiglu.load_state_dict(weights)
 
@@ -420,41 +423,18 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    rms_norm_mha = RMSNorm(d_model)
-    rms_norm_mha.load_state_dict(weights)
-    rope = RotaryPositionalEmbedding(rope_theta, d_model // num_heads, context_length)
-    multihead_attention = MultiHeadSelfAttention(d_model, num_heads, rope)
-    multihead_attention.load_state_dict(
-        {
-            "q_weights": weights["attn.q_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "k_weights": weights["attn.k_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "v_weights": weights["attn.v_proj.weight"].reshape(
-                num_heads, d_model // num_heads, d_model
-            ),
-            "o_weights": weights["attn.output_proj.weight"],
-        }
+    transformer_lm = TransformerLanguageModel(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        d_ff=d_ff,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        rope_theta=rope_theta
     )
+    transformer_lm.load_state_dict(weights)
 
-    # layer 2 (rms norm + position wise ffn) + layer1 input
-    rms_norm_ffn = RMSNorm(d_model)
-    rms_norm_ffn.load_state_dict({"gain": weights["ln2.weight"]})
-    swiglu_ffn = SwiGLUFeedForwardNetwork(d_model, d_ff)
-    swiglu_ffn.load_state_dict(
-        {
-            "w1_weights": weights["ffn.w1.weight"],
-            "w2_weights": weights["ffn.w2.weight"],
-            "w3_weights": weights["ffn.w3.weight"],
-        }
-    )
-    transform_block = TransformerBlock(
-        multihead_attention, swiglu_ffn, rms_norm_mha, rms_norm_ffn
-    )
-    print(transform_block.state_dict().keys())
-
+    return transformer_lm.forward(in_indices)
 
 def run_rmsnorm(
     d_model: int,
@@ -477,7 +457,7 @@ def run_rmsnorm(
         RMSNorm of the `in_features`.
     """
     rmsNorm = RMSNorm(d_model, eps)
-    rmsNorm.load_state_dict({"gain": weights})
+    rmsNorm.load_state_dict({"weight": weights})
 
     return rmsNorm.forward(in_features)
 

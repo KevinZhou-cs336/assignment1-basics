@@ -6,6 +6,26 @@ from cs336_basics.transformers.rope import RotaryPositionalEmbedding
 
 
 class MultiHeadSelfAttention(torch.nn.Module):
+    """Multi-Head Self-Attention (Vaswani et al., 2017) with optional RoPE.
+
+    Projects input into Q, K, V with shared (d_model → d_model) linear layers,
+    splits the result across num_heads, runs scaled dot-product attention
+    independently per head, then merges and projects back to d_model.
+
+    Data flow (batch_size=B, seq_len=T, d_model=D, num_heads=H, d_head=D/H):
+        in_features (B, T, D)
+            → Q/K/V projection  → (B, T, D)
+            → reshape + transpose → (B, H, T, D/H)   per-head Q, K, V
+            → [RoPE on Q, K]    → (B, H, T, D/H)   position-encoded Q, K
+            → SDPA per head     → (B, H, T, D/H)   attention outputs
+            → transpose + reshape → (B, T, D)       merged heads
+            → output projection → (B, T, D)         final output
+
+    State dict keys (within this module): q_proj.weight, k_proj.weight,
+        v_proj.weight, output_proj.weight  — each (D, D).
+    When nested inside TransformerBlock as self.attn, these become attn.q_proj.weight, etc.
+    """
+
     def __init__(
         self, d_model: int, num_heads: int, rope: RotaryPositionalEmbedding = None
     ):

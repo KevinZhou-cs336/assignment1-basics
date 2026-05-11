@@ -24,19 +24,19 @@ class TransformerBlock(torch.nn.Module):
         ln1.*   — RMSNorm before attention sub-layer
         attn.*  — MultiHeadSelfAttention (q_proj, k_proj, v_proj, output_proj)
         ln2.*   — RMSNorm before FFN sub-layer
-        ffn.*   — SwiGLUFeedForwardNetwork (w1_weights, w2_weights, w3_weights)
+        ffn.*   — SwiGLUFeedForwardNetwork (w1.weight, w2.weight, w3.weight)
     """
 
     def __init__(
         self,
         attn: MultiHeadSelfAttention,
         ffn: SwiGLUFeedForwardNetwork,
-        rms_norm_mha: RMSNorm,
+        rms_norm_attn: RMSNorm,
         rms_norm_ffn: RMSNorm,
     ):
         super().__init__()
 
-        self.ln1 = rms_norm_mha   # RMSNorm before attention sub-layer
+        self.ln1 = rms_norm_attn   # RMSNorm before attention sub-layer
         self.attn = attn          # MultiHeadSelfAttention (RoPE stored inside attn)
         self.ln2 = rms_norm_ffn   # RMSNorm before FFN sub-layer
         self.ffn = ffn            # SwiGLU feed-forward network
