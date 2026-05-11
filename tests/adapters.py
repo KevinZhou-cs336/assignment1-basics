@@ -18,7 +18,7 @@ from cs336_basics.transformers import (
     RotaryPositionalEmbedding,
 )
 from cs336_basics.transformers.functions import scaled_dot_product_attention, softmax
-from cs336_basics.transformers.multihead_self_attention import MultiHeadAttention
+from cs336_basics.transformers.multihead_self_attention import MultiHeadSelfAttention
 
 
 def run_linear(
@@ -158,11 +158,17 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    multihead_attention = MultiHeadAttention(d_model, num_heads)
-
-    return multihead_attention.forward(
-        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight, in_features
+    multihead_attention = MultiHeadSelfAttention(d_model, num_heads)
+    multihead_attention.load_state_dict(
+        {
+            "q_weights": q_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "k_weights": k_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "v_weights": v_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "o_weights": o_proj_weight,
+        }
     )
+
+    return multihead_attention.forward(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -203,11 +209,17 @@ def run_multihead_self_attention_with_rope(
         implementation with the given QKV projection weights and input features.
     """
     rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len)
-    multihead_attention = MultiHeadAttention(d_model, num_heads, rope)
-
-    return multihead_attention.forward(
-        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight, in_features
+    multihead_attention = MultiHeadSelfAttention(d_model, num_heads, rope)
+    multihead_attention.load_state_dict(
+        {
+            "q_weights": q_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "k_weights": k_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "v_weights": v_proj_weight.reshape(num_heads, d_model//num_heads, d_model),
+            "o_weights": o_proj_weight,
+        }
     )
+
+    return multihead_attention.forward(in_features, token_positions)
 
 
 def run_rope(
@@ -304,6 +316,7 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
+
     raise NotImplementedError
 
 
