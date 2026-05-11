@@ -69,7 +69,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
     embedding = Embedding(vocab_size, d_model)
-    embedding.load_state_dict({"embedding_matrices": weights})
+    embedding.load_state_dict({"weight": weights})
 
     return embedding.forward(token_ids)
 
