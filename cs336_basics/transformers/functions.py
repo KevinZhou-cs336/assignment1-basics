@@ -109,3 +109,68 @@ def scaled_dot_product_attention(
     #   value:      (..., seq_len_k, d_v)         indices ...mv  (m=seq_len_k contracts, v=d_v)
     #   → (..., seq_len_q, d_v)  output[..., q, :] = weighted sum of value rows
     return torch.einsum("...nm,...mv->...nv", softmax_qk, value)
+
+
+def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Numerically stable cross-entropy loss averaged over all token positions.
+
+    Computes: loss = mean_{all positions} -log p(target_token | context)
+
+    Naive approach (NOT used here):
+        prob = softmax(logits)[target]  # exp(logit) can overflow to inf
+        loss = -log(prob)              # if prob underflows to 0, log(0) = -inf
+
+    Instead we use the log-sum-exp identity to bypass those intermediate values:
+        -log(softmax(o)[t]) = -log( exp(o[t]) / Σ exp(o[k]) )
+                            = -o[t] + log( Σ exp(o[k]) )
+    The numerator o[t] is a raw logit — exp and log cancel algebraically so
+    we never compute them, eliminating the underflow → log(0) risk.
+    The denominator still calls exp, but subtracting max(o) first keeps every
+    argument ≤ 0, bounding exp ∈ (0, 1] and preventing overflow.
+
+    Args:
+        logits:  (..., vocab_size)  Raw (pre-softmax) scores for every vocabulary
+                 token. Leading dims can be any mix of batch/sequence axes.
+        targets: (...)             Integer token indices in [0, vocab_size).
+                 Shape must match the leading dims of logits.
+
+    Returns:
+        Scalar — mean cross-entropy loss over all token positions.
+    """
+    in_dtype = logits.dtype
+
+    # Promote to float32: bfloat16/float16 exp/log are prone to overflow.
+    logits = logits.to(torch.float32)
+
+    # Flatten all leading (batch/sequence) dims into one so 2-D indexing works
+    # for any input shape (batch, seq_len, vocab_size) or (batch, vocab_size).
+    #   logits:  (N, vocab_size)  where N = total number of token predictions
+    #   targets: (N,)             one correct token index per prediction
+    logits = logits.reshape(-1, logits.shape[-1])
+    targets = targets.reshape(-1)
+
+    # Subtract per-row max before exp (log-sum-exp stability trick).
+    # Shifting by a constant c satisfies: exp(o-c)/Σexp(o_k-c) = exp(o)/Σexp(o_k)
+    # because c cancels in numerator and denominator.
+    # After shifting, all arguments to exp are ≤ 0, so exp ∈ (0, 1] — no overflow.
+    # Shape: (N, vocab_size), unchanged.
+    logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+
+    # Numerator: the shifted logit at the target token position for each row.
+    # From the identity above, the -o[t] term is just the raw (shifted) logit —
+    # no exp is computed here, so there is no underflow → log(0) risk.
+    # Shape: (N,)
+    logits_numerator = logits[torch.arange(targets.shape[0]), targets]
+
+    # Denominator: log(Σ exp(shifted_logits)) along the vocab axis.
+    # Because we subtracted the max, the sum ≥ exp(0) = 1, so log(sum) ≥ 0
+    # and we never hit log(0). Individual exp terms may underflow to 0 for very
+    # negative logits, but those tokens have negligible probability anyway.
+    # Shape: (N,)
+    logits_denominator = torch.log(torch.sum(torch.exp(logits), dim=-1))
+
+    # Per-token loss = -o[target] + log(Σ exp(o[k]))  (shape: (N,))
+    # Sum over all N positions then divide by N to get the mean loss scalar.
+    results = torch.sum(-logits_numerator + logits_denominator) / logits.shape[0]
+
+    return results.to(in_dtype)

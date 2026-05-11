@@ -34,24 +34,37 @@ class RMSNorm(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.ones(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (..., d_model)  — arbitrary leading batch/sequence dims
+        # x: (..., d_model)
+        #   Leading dims (...) can be any combination of batch and sequence axes,
+        #   e.g. (batch_size, seq_len, d_model) or just (seq_len, d_model).
+        #   The last axis (dim=-1, size d_model) holds the feature vector for one token.
+        #
+        # Key design choice: normalization is PER-TOKEN and INDEPENDENT across tokens.
+        #   Each token's d_model-dimensional vector is normalized by its own RMS scalar.
+        #   No information flows between tokens — this is purely an elementwise rescaling
+        #   along the feature axis (dim=-1), not across the sequence axis.
         in_dtype = x.dtype
 
         # Promote to float32 to avoid overflow in pow/sqrt under bfloat16/float16
         x = x.to(torch.float32)
 
-        # Compute per-token RMS along the feature axis (dim=-1)
-        # pow(x, 2): (..., d_model)  element-wise square
-        # .sum(dim=-1, keepdim=True): (..., 1)  sum of squares per token
-        # / d_model + eps:            (..., 1)  mean of squares + stability term
-        # sqrt:                       (..., 1)  RMS value per token
+        # Compute one RMS scalar per token by reducing over the feature axis (dim=-1):
+        #   pow(x, 2)              : (..., d_model)  — square every feature value
+        #   .sum(dim=-1, keepdim=True) : (..., 1)    — sum of squares within each token's vector
+        #   / self.d_model         : (..., 1)        — mean of squares (= variance without centering)
+        #   + self.eps             : (..., 1)        — numerical stability guard against division by zero
+        #   sqrt(...)              : (..., 1)        — RMS scalar, one per token
         rms_x = torch.sqrt(
             torch.pow(x, 2).sum(dim=-1, keepdim=True) / self.d_model + self.eps
         )
 
-        # Normalize then apply learned scale
-        # x / rms_x:      (..., d_model)  unit-RMS vectors (rms_x broadcasts over d_model)
-        # * self.weight:   (..., d_model)  per-feature rescaling (weight broadcasts over batch/seq)
+        # Normalize: divide each token's feature vector by that token's RMS scalar.
+        #   rms_x broadcasts from (..., 1) to (..., d_model) along the feature axis.
+        #   Result: every token vector now has RMS = 1.
+        #
+        # Rescale: multiply by the learned weight vector (shape: d_model,).
+        #   weight broadcasts over all leading dims (...), applying a per-feature scale.
+        #   This lets the model learn to restore amplitude on a per-dimension basis.
         result = (x / rms_x) * self.weight
 
         # Cast back to original dtype (e.g. bfloat16 for mixed-precision training)
