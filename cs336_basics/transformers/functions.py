@@ -120,13 +120,23 @@ def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         prob = softmax(logits)[target]  # exp(logit) can overflow to inf
         loss = -log(prob)              # if prob underflows to 0, log(0) = -inf
 
-    Instead we use the log-sum-exp identity to bypass those intermediate values:
-        -log(softmax(o)[t]) = -log( exp(o[t]) / Σ exp(o[k]) )
-                            = -o[t] + log( Σ exp(o[k]) )
-    The numerator o[t] is a raw logit — exp and log cancel algebraically so
-    we never compute them, eliminating the underflow → log(0) risk.
-    The denominator still calls exp, but subtracting max(o) first keeps every
-    argument ≤ 0, bounding exp ∈ (0, 1] and preventing overflow.
+    Two distinct numerical hazards exist, each requiring its own fix:
+
+    Hazard 1 — Overflow in the denominator (exp → inf):
+        Fixed by subtracting max(o) before exp. After shifting, all arguments
+        to exp are ≤ 0, so exp ∈ (0, 1] and the sum is always finite.
+        Note: subtracting max does NOT fix the numerator underflow below.
+
+    Hazard 2 — Underflow in the numerator (exp → 0 → log(0) = -inf):
+        Even after subtracting max, the target token may have a logit far below
+        the maximum (e.g., the model confidently predicts the wrong token):
+            shifted logits: [0, -1, -2, ..., -1500]  ← target is -1500
+            exp(-1500) underflows to 0.0 in float32
+            softmax → 0.0 → log(0.0) = -inf
+        Fixed by the log-sum-exp identity, which avoids exp on the target entirely:
+            -log(softmax(o)[t]) = -log( exp(o[t]) / Σ exp(o[k]) )
+                                = -o[t] + log( Σ exp(o[k]) )
+        The numerator is just the raw logit o[t] — no exp, no underflow possible.
 
     Args:
         logits:  (..., vocab_size)  Raw (pre-softmax) scores for every vocabulary
@@ -157,8 +167,11 @@ def cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     logits = logits - torch.max(logits, dim=-1, keepdim=True).values
 
     # Numerator: the shifted logit at the target token position for each row.
-    # From the identity above, the -o[t] term is just the raw (shifted) logit —
-    # no exp is computed here, so there is no underflow → log(0) risk.
+    # The log-sum-exp identity reduces the numerator to just o[t] — no exp call.
+    # This is the critical protection against Hazard 2: even though subtracting
+    # max prevents denominator overflow, it does NOT prevent the target token's
+    # exp from underflowing to 0 when the target logit is far below the max.
+    # By never calling exp on the target, underflow → log(0) is impossible here.
     # Shape: (N,)
     logits_numerator = logits[torch.arange(targets.shape[0]), targets]
 
