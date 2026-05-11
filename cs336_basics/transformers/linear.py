@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 
@@ -13,11 +15,11 @@ class Linear(torch.nn.Module):
         # Row-majoring matrix d_out * d_in
         self.device = device
         self.dtype = dtype
-        self.weights = torch.nn.Parameter(torch.randn(out_features, in_features))
-        std = torch.sqrt(2 / (out_features + in_features))
+        self.weight = torch.nn.Parameter(torch.randn(out_features, in_features))
+        std = math.sqrt(2 / (out_features + in_features))
         torch.nn.init.trunc_normal_(
-            self.weights, mean=0, std=std, a=-3 * std, b=3 * std
+            self.weight, mean=0, std=std, a=-3 * std, b=3 * std
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.einsum("...i,ji->...j", x, self.weights)
+        return torch.einsum("...i,ji->...j", x, self.weight)
