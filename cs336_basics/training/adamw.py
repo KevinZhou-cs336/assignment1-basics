@@ -136,35 +136,41 @@ class AdamWOptimizer(torch.optim.Optimizer):
                 if p.grad is None:
                     continue  # parameter received no gradient this step — skip
 
-                # p:    tensor of shape (*)  — the parameter being updated
-                # grad: tensor of shape (*)  — ∇_θ ℓ(θ; B_t), same shape as p
+                # p:    tensor of shape p.shape  — the parameter being updated.
+                #       e.g. (V, D) for an embedding table, (D, D) for a
+                #       projection weight, (D,) for an RMSNorm scale vector.
+                # grad: tensor of the same shape as p — ∇_θ ℓ(θ; B_t).
+                #       Every element of p has exactly one gradient element.
                 grad = p.grad.data
 
                 # Retrieve per-parameter state (persists across step() calls).
-                # On the first step, t=1 and m/v default to scalar 0, which
-                # broadcasts correctly against grad when computing the updates.
                 state = self.state[p]
-                t = state.get("t", 1)   # step index, starts at 1 per Algorithm 1
-                m = state.get("m", 0)   # first moment:  shape (*) after first step
-                v = state.get("v", 0)   # second moment: shape (*) after first step
+                t = state.get("t", 1)   # int scalar — step index, starts at 1
+                # m and v start as scalar 0 on the first step. After the first
+                # EMA update they become tensors of the same shape as p (via
+                # broadcasting), and are stored that way in state from step 2 on.
+                m = state.get("m", 0)   # same shape as p after step 1 (scalar 0 at init)
+                v = state.get("v", 0)   # same shape as p after step 1 (scalar 0 at init)
 
-                # Algorithm 1, line 7: bias-corrected learning rate (scalar).
+                # Algorithm 1, line 7: bias-corrected learning rate.
+                # scalar — a single number shared by every element of p this step.
                 # Early in training β₁ᵗ and β₂ᵗ are close to 1, so this factor
                 # is large, compensating for m and v being biased toward 0.
                 cur_lr = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
 
                 # Algorithm 1, line 8: weight decay — pull θ toward zero.
-                # Uses BASE lr α (not bias-corrected α_t) to decouple
+                # Uses BASE lr α (not bias-corrected cur_lr) to decouple
                 # regularization from the adaptive gradient scaling.
-                # p: shape (*) → shape (*), in-place.
+                # p.data: same shape as p, updated in-place.
                 p.data -= lr * weight_decay * p.data
 
                 # Algorithm 1, line 9: first moment (mean of gradients).
-                # Exponential moving average of g; shape (*).
+                # Result has same shape as grad (and p) — one EMA value per element.
                 m = betas[0] * m + (1 - betas[0]) * grad
 
                 # Algorithm 1, line 10: second moment (mean of squared gradients).
-                # Exponential moving average of g²; shape (*), always ≥ 0.
+                # grad * grad is element-wise squaring, same shape as grad.
+                # v is always ≥ 0 since it is an EMA of non-negative values.
                 v = betas[1] * v + (1 - betas[1]) * grad * grad
 
                 # Save updated moments back to state for the next step.
@@ -172,10 +178,11 @@ class AdamWOptimizer(torch.optim.Optimizer):
                 state["v"] = v
 
                 # Algorithm 1, line 11: moment-adjusted parameter update.
-                # m / (√v + ε) normalizes the gradient by its historical RMS,
-                # giving larger steps for parameters with small, consistent
-                # gradients and smaller steps for noisy or large-gradient ones.
-                # All tensors are shape (*); cur_lr and ε are scalars.
+                # All of m, v, p.data have the same shape as p.
+                # cur_lr and ε are scalars that broadcast over every element.
+                # m / (√v + ε) gives each element its own adaptive step size:
+                # large consistent gradients → large v → small step;
+                # small noisy gradients → small v → relatively larger step.
                 p.data -= cur_lr * m / torch.sqrt(v + eps)
 
                 # Increment step counter for bias correction next call.
