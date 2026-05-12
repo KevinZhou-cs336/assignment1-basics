@@ -11,6 +11,7 @@ from torch import Tensor
 
 from cs336_basics.bpe import BPETokenizer
 from cs336_basics.training.adamw import AdamWOptimizer
+from cs336_basics.training.learning_utils import gradient_clipping, learning_rate_schedule
 from cs336_basics.transformers import (
     Embedding,
     Linear,
@@ -432,11 +433,12 @@ def run_transformer_lm(
         d_ff=d_ff,
         num_heads=num_heads,
         num_layers=num_layers,
-        rope_theta=rope_theta
+        rope_theta=rope_theta,
     )
     transformer_lm.load_state_dict(weights)
 
     return transformer_lm.forward(in_indices)
+
 
 def run_rmsnorm(
     d_model: int,
@@ -547,7 +549,7 @@ def run_gradient_clipping(
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    gradient_clipping(parameters=parameters, max_l2_norm=max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
@@ -582,7 +584,9 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    return learning_rate_schedule(
+        it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters
+    )
 
 
 def run_save_checkpoint(
