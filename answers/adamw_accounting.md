@@ -55,38 +55,353 @@ Memory_optimizer = 2 × 4P = 8P bytes
 ```
 
 ### Activations
-During the forward pass, intermediate tensors must be retained for the backward pass. We account for the output of each listed sub-operation.
 
-**Per Transformer block (×L):**
+**What is an activation?**
+Every intermediate tensor produced during the forward pass that must be kept in memory for the backward pass is called an activation. The rule is simple: if operation `Y = f(X)` is non-trivial, then `X` must be saved so that the backward pass can compute gradients. The output `Y` is also saved if any later operation needs it as input.
 
-| Sub-operation | Output shape | Elements |
-|---------------|-------------|---------|
-| RMSNorm before attention | (B, T, D) | BTD |
-| RMSNorm before FFN | (B, T, D) | BTD |
-| Q projection | (B, T, D) | BTD |
-| K projection | (B, T, D) | BTD |
-| V projection | (B, T, D) | BTD |
-| QKᵀ scores | (B, H, T, T) | BHT² |
-| Softmax weights | (B, H, T, T) | BHT² |
-| Weighted sum of V | (B, T, D) | BTD |
-| Output projection | (B, T, D) | BTD |
-| FFN W1 output (gate, before SiLU) | (B, T, F) | BTF |
-| FFN SiLU output | (B, T, F) | BTF |
-| FFN W3 output (value branch) | (B, T, F) | BTF |
-| FFN element-wise product | (B, T, F) | BTF |
-| FFN W2 output | (B, T, D) | BTD |
+**What dimensions appear and what do they mean?**
 
-Per-block total: **8BTD + 2BHT² + 4BTF** elements
+| Symbol | What it counts | Intuition |
+|--------|---------------|-----------|
+| B | batch size | how many independent text sequences we process simultaneously |
+| T | sequence length (context\_length = 1024) | how many tokens are in each sequence |
+| D | d\_model = 1600 | each token is represented as a vector of 1600 numbers |
+| H | num\_heads = 25 | attention is split into 25 independent "heads" |
+| d = D/H | per-head dim = 64 | each head works with a 64-number slice of the D-dim vector |
+| F | d\_ff = 4288 ≈ (8/3)D | FFN intermediate width, wider than D to add capacity |
+| V | vocab\_size = 50257 | number of possible tokens; the final output has one score per token |
 
-**Global (computed once):**
+---
 
-| Component | Output shape | Elements |
-|-----------|-------------|---------|
-| Final RMSNorm | (B, T, D) | BTD |
-| Output embedding / LM head (logits) | (B, T, V) | BTV |
-| Cross-entropy (uses logits in-place) | scalar | — |
+#### Per Transformer block (×L = 48 blocks)
 
-Global total: **BTD + BTV** elements
+Every block receives a tensor of shape `(B, T, D)` — B sequences, each T tokens long, each token a D-dimensional vector — and produces the same shape at the end. Inside the block, several intermediate tensors are created.
+
+---
+
+##### RMSNorm before attention — output shape: **(B, T, D)**
+
+```
+input:  (B, T, D)   — residual stream coming into the block
+output: (B, T, D)   — normalized version; same shape because RMSNorm
+                       only rescales each token vector, does not change its size
+```
+
+Why saved? The backward pass needs this output as the input to the Q/K/V projection weight-gradient computation:
+`grad_W_Q = RMSNorm_output.T @ grad_Q`
+
+Elements: **B × T × D**
+
+---
+
+##### Q projection — output shape: **(B, T, D)**
+
+```
+operation:  Q = RMSNorm_output @ W_Q
+W_Q shape:  (D, D)  — D inputs → D query outputs per token
+output:     (B, T, D)
+```
+
+Why `(B, T, D)`?
+- B: one query matrix per sequence in the batch
+- T: one query vector per token (each token asks its own question)
+- D: the query vector has D dimensions (it is later split into H heads of d=D/H each)
+
+Why saved? The backward pass for computing `grad_K` during `QKᵀ` needs Q:
+`grad_K = grad_scores.T @ Q`
+
+Elements: **B × T × D**
+
+---
+
+##### K projection — output shape: **(B, T, D)**
+
+```
+operation:  K = RMSNorm_output @ W_K
+output:     (B, T, D)
+```
+
+Same reasoning as Q. Every token produces a key vector that other tokens will compare their query against.
+
+Why saved? Backward of `QKᵀ` needs K to compute `grad_Q`:
+`grad_Q = grad_scores @ K`
+
+Elements: **B × T × D**
+
+---
+
+##### V projection — output shape: **(B, T, D)**
+
+```
+operation:  V = RMSNorm_output @ W_V
+output:     (B, T, D)
+```
+
+Each token produces a value vector — the content it contributes to other tokens that attend to it.
+
+Why saved? Backward of the weighted sum `softmax_weights @ V` needs V to compute `grad_softmax_weights`:
+`grad_softmax_weights = grad_attn_output @ V.T`
+
+Elements: **B × T × D**
+
+---
+
+##### QKᵀ attention scores — output shape: **(B, H, T, T)**
+
+```
+operation: scores = Q @ K.T      (after reshaping Q and K into H heads)
+Q reshaped: (B, H, T, d)         — B sequences, H heads, T queries,  d=D/H dims each
+K reshaped: (B, H, T, d)         — B sequences, H heads, T keys,     d=D/H dims each
+output:     (B, H, T, T)
+```
+
+Why `(B, H, T, T)`?
+- B: one attention matrix per sequence
+- H: each of the 25 heads computes its own attention pattern independently
+- first T: one row per query token (the token that is "looking")
+- second T: one column per key token (the token being "looked at")
+
+Entry `[b, h, i, j]` is the raw dot-product score: "in sequence b, head h, how relevant is key token j to query token i?"
+
+Why saved? It is the input to softmax; softmax backward does not need it (only the softmax output is needed), but in standard PyTorch autograd this tensor is retained as the input to the softmax node.
+
+Elements: **B × H × T × T**
+
+For GPT-2 XL (B=1): 1 × 25 × 1024 × 1024 = **26,214,400** — this single tensor is already 16× larger than one (T×D) tensor.
+
+---
+
+##### Softmax attention weights — output shape: **(B, H, T, T)**
+
+```
+operation: weights = softmax(scores / sqrt(d), dim=-1)
+output:    (B, H, T, T)   — same shape as scores; each row now sums to 1
+```
+
+Why same shape? Softmax converts raw scores into probabilities but does not add or remove dimensions.
+
+Why saved? The softmax backward needs the softmax output to compute `grad_scores`:
+`grad_scores[i] = weights[i] * (grad_weights[i] - sum(grad_weights[i] * weights[i]))`
+
+Elements: **B × H × T × T**
+
+---
+
+##### Weighted sum of values (attention output) — output shape: **(B, T, D)**
+
+```
+operation: attn_output = weights @ V     (per head, then concatenate)
+weights:   (B, H, T, T)
+V:         (B, H, T, d)
+per-head:  (B, H, T, d)   →  concatenated → (B, T, H×d) = (B, T, D)
+```
+
+Why `(B, T, D)`?
+- Each of the T query tokens receives a weighted mixture of all T value vectors.
+- After concatenating H heads (each of size d=64), the result is H×d = D = 1600 per token.
+
+Why saved? It is the input to the output projection; backward of output projection needs it to compute `grad_W_O`:
+`grad_W_O = attn_output.T @ grad_output_proj`
+
+Elements: **B × T × D**
+
+---
+
+##### Output projection — output shape: **(B, T, D)**
+
+```
+operation:  out = attn_output @ W_O
+W_O shape:  (D, D)
+output:     (B, T, D)
+```
+
+This linearly mixes information across the H heads back into a single D-dimensional token vector.
+
+Why saved? It is added to the residual stream; the tensor flows to RMSNorm2 which needs it as its input.
+
+Elements: **B × T × D**
+
+---
+
+##### RMSNorm before FFN — output shape: **(B, T, D)**
+
+```
+input:  (B, T, D)  — residual after attention (block_input + output_proj)
+output: (B, T, D)  — normalized; same shape
+```
+
+Why saved? The FFN weight-gradient computations (for W1, W3) need this as their input:
+`grad_W1 = RMSNorm2_output.T @ grad_W1_output`
+
+Elements: **B × T × D**
+
+---
+
+##### FFN W1 gate projection — output shape: **(B, T, F)**
+
+```
+operation:  gate = RMSNorm2_output @ W1.T
+W1 shape:   (F, D)   — maps D dims → F dims
+output:     (B, T, F)
+```
+
+Why `(B, T, F)`?
+- F = 4288 ≈ 2.68 × D: the FFN first expands each token's representation to a wider space (more capacity for computation).
+- The `F` dimension is this wider hidden space.
+
+Why saved? It is the input to SiLU; SiLU backward needs the pre-activation value to compute the derivative:
+`SiLU'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))`
+
+Elements: **B × T × F**
+
+---
+
+##### FFN SiLU output — output shape: **(B, T, F)**
+
+```
+operation:  silu_out = SiLU(gate)   — elementwise; SiLU(x) = x * sigmoid(x)
+output:     (B, T, F)               — same shape as gate
+```
+
+Why same shape? SiLU is applied independently to each of the B×T×F elements.
+
+Why saved? It is one of the two inputs to the element-wise product (SwiGLU gate). Backward of the product needs both inputs to compute each gradient:
+`grad_W3_output = grad_product * silu_out`
+
+Elements: **B × T × F**
+
+---
+
+##### FFN W3 value projection — output shape: **(B, T, F)**
+
+```
+operation:  value = RMSNorm2_output @ W3.T
+W3 shape:   (F, D)   — same shape as W1, maps D → F
+output:     (B, T, F)
+```
+
+This is the second branch of SwiGLU: it produces the "value" that will be gated.
+
+Why saved? Backward of the element-wise product needs it:
+`grad_silu_out = grad_product * value`
+
+Elements: **B × T × F**
+
+---
+
+##### FFN element-wise product (SwiGLU gate) — output shape: **(B, T, F)**
+
+```
+operation:  product = silu_out * value    — elementwise multiplication
+output:     (B, T, F)
+```
+
+This is the SwiGLU gating: the value branch is multiplied element-by-element by the gated activation branch.
+
+Why saved? It is the input to W2; backward of W2 needs it to compute `grad_W2`:
+`grad_W2 = product.T @ grad_W2_output`
+
+Elements: **B × T × F**
+
+---
+
+##### FFN W2 down projection — output shape: **(B, T, D)**
+
+```
+operation:  ffn_output = product @ W2.T
+W2 shape:   (D, F)   — maps F dims back down to D dims
+output:     (B, T, D)
+```
+
+Why `(B, T, D)`? We compress the F-dimensional representation back to D so the FFN output can be added to the residual stream (which has shape B×T×D).
+
+Why saved? It is added to the residual stream; the result is the block's output tensor, which is the next block's input (and is counted there).
+
+Elements: **B × T × D**
+
+---
+
+##### Per-block total
+
+| Tensor | Shape | Elements |
+|--------|-------|---------|
+| RMSNorm1 output | (B,T,D) | BTD |
+| Q | (B,T,D) | BTD |
+| K | (B,T,D) | BTD |
+| V | (B,T,D) | BTD |
+| QKᵀ scores | (B,H,T,T) | BHT² |
+| Softmax weights | (B,H,T,T) | BHT² |
+| Weighted sum of V | (B,T,D) | BTD |
+| Output projection | (B,T,D) | BTD |
+| RMSNorm2 output | (B,T,D) | BTD |
+| W1 gate output | (B,T,F) | BTF |
+| SiLU output | (B,T,F) | BTF |
+| W3 value output | (B,T,F) | BTF |
+| Element-wise product | (B,T,F) | BTF |
+| W2 FFN output | (B,T,D) | BTD |
+
+**Per-block total: 8BTD + 2BHT² + 4BTF elements**
+
+(The 8 BTD tensors are: RMSNorm1, Q, K, V, weighted-sum, output-proj, RMSNorm2, W2-output)
+
+---
+
+#### Global components (computed once, not ×L)
+
+---
+
+##### Final RMSNorm — output shape: **(B, T, D)**
+
+```
+input:  (B, T, D)  — last block's output
+output: (B, T, D)  — normalized; same shape
+```
+
+This is the normalization applied to the final hidden states before the LM head.
+
+Why saved? The LM head (W_lm) backward needs it:
+`grad_W_lm = final_rms_output.T @ grad_logits`
+
+Elements: **B × T × D**
+
+---
+
+##### LM head / output embedding — output shape: **(B, T, V)**
+
+```
+operation:  logits = final_rms_output @ W_lm.T
+W_lm shape: (V, D)   — maps D dims to V vocab scores
+output:     (B, T, V)
+```
+
+Why `(B, T, V)`?
+- B: one output per sequence in the batch
+- T: at each of the T token positions, the model predicts the next token
+- V = 50,257: the model outputs one raw score (logit) for every possible next token in the vocabulary
+
+This is by far the widest tensor per token: V = 50,257 vs D = 1,600.
+
+Why saved? Cross-entropy backward needs the logits to compute the softmax probabilities and then `grad_logits`.
+
+Elements: **B × T × V**
+
+---
+
+##### Cross-entropy — no new large tensor
+
+```
+input:  logits (B, T, V)  — already saved above
+        targets (B, T)    — token IDs, tiny
+output: scalar loss
+```
+
+The backward of cross-entropy only needs the logits (already in memory) and the targets (tiny). No new large tensor is allocated.
+
+---
+
+#### Global total: BTD + BTV elements
+
+---
 
 **Total activation memory:**
 ```
