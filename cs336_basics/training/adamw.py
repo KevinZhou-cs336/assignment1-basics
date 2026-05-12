@@ -32,6 +32,35 @@ class AdamWOptimizer(torch.optim.Optimizer):
       - m and v are stored per-parameter in self.state[p] so each parameter
         has its own independent moment history across steps.
 
+    param_groups structure:
+      self.param_groups is a list of dicts. Each dict contains:
+        "params"       — list of nn.Parameter tensors belonging to this group
+        "lr"           — learning rate α (may differ across groups)
+        "betas"        — (β₁, β₂) moment decay rates
+        "eps"          — ε numerical stability constant
+        "weight_decay" — λ regularization coefficient
+      Groups that omit a key inherit the value from `defaults` (set in __init__).
+      Common use: give embedding tables a different lr or zero weight_decay
+      compared to projection weights.
+
+    Parameter shapes in a GPT-2 XL Transformer (V=50257, D=1600, F≈6400, L=48):
+      Each parameter p is a leaf tensor; its shape identifies its role:
+        token_embeddings.weight            (V, D)  — vocabulary embedding table
+        position_embeddings.weight         (T, D)  — absolute positional embeddings
+        layers.i.attn.q_proj.weight        (D, D)  — query projection (all heads packed)
+        layers.i.attn.k_proj.weight        (D, D)  — key projection
+        layers.i.attn.v_proj.weight        (D, D)  — value projection
+        layers.i.attn.output_proj.weight   (D, D)  — output projection (heads → model dim)
+        layers.i.ln1.weight                (D,)    — RMSNorm scale before attention
+        layers.i.ffn.w1.weight             (F, D)  — FFN up/gate projection (SwiGLU w1)
+        layers.i.ffn.w2.weight             (D, F)  — FFN down projection
+        layers.i.ffn.w3.weight             (F, D)  — FFN gate projection (SwiGLU w3)
+        layers.i.ln2.weight                (D,)    — RMSNorm scale before FFN
+        ln_final.weight                    (D,)    — final RMSNorm scale
+        lm_head.weight                     (V, D)  — output projection to vocab logits
+      m and v in self.state[p] have the SAME shape as p (not scalars), so each
+      individual element of each parameter gets its own adaptive learning rate.
+
     Args:
         params:       Parameters or param_groups to optimize. Can be a flat
                       iterable of nn.Parameter objects (all share the same
