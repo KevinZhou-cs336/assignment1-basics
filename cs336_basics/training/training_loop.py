@@ -20,8 +20,22 @@ Usage examples:
 """
 
 import argparse
+import os
 
-from wandb.util import np
+import numpy as np
+import torch
+
+from cs336_basics.training import cross_entropy
+from cs336_basics.training.adamw import AdamWOptimizer
+from cs336_basics.training.checkpoint_util import load_checkpoint, save_checkpoint
+from cs336_basics.training.data_util import get_batch
+from cs336_basics.training.learning_utils import (
+    gradient_clipping,
+    learning_rate_schedule,
+)
+from cs336_basics.transformers.transformer_language_model import (
+    TransformerLanguageModel,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -250,27 +264,145 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
+    print(f"[Training Loop]: args are {args}")
 
-    # TODO: load training and validation datasets with np.load(..., mmap_mode='r')
-    dataset = np.load
-    # TODO: instantiate TransformerLanguageModel with args.vocab_size, args.context_length,
-    #       args.d_model, args.num_heads, args.num_layers, args.d_ff, args.rope_theta
-    transformer_lm = TransformerLanguageModel()
-    # TODO: instantiate AdamWOptimizer with args.max_lr, (args.beta1, args.beta2),
-    #       args.eps, args.weight_decay
+    # Create checkpoint directory upfront so save_checkpoint never fails on a missing path.
+    print(f"[Preparation]: make checkpoint dir at {args.checkpoint_dir}")
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    # TODO: if args.resume_from is not None, call load_checkpoint(...)
+    # mmap_mode='r' memory-maps the file: the OS loads pages on demand rather than
+    # reading the entire dataset into RAM. Essential for datasets larger than available memory.
+    train_dataset = np.load(args.train_data, mmap_mode="r")
+    validation_dataset = np.load(args.val_data, mmap_mode="r")
 
-    # TODO: training loop — for step in range(start_step, args.total_steps):
-    #   - sample a batch with get_batch(...)
-    #   - forward pass + cross_entropy loss
-    #   - loss.backward()
-    #   - gradient_clipping(model.parameters(), args.grad_clip) if args.grad_clip > 0
-    #   - set learning rate with learning_rate_schedule(...) on the optimiser
-    #   - optimizer.step() then optimizer.zero_grad()
-    #   - log / validate / checkpoint at the appropriate intervals
+    transformer_lm = TransformerLanguageModel(
+        vocab_size=args.vocab_size,
+        context_length=args.context_length,
+        num_layers=args.num_layers,
+        d_model=args.d_model,
+        num_heads=args.num_heads,
+        d_ff=args.d_ff,
+        rope_theta=args.rope_theta,
+    )
+    # Move all parameters to the target device before creating the optimizer.
+    # If we moved them after, the optimizer's m/v tensors (created on first step())
+    # would still be on CPU while parameters are on GPU, causing a device mismatch.
+    transformer_lm.to(args.device)
 
-    pass
+    # Initialize optimizer once and keep it alive for the entire training run.
+    # AdamW accumulates per-parameter moment estimates (m, v) across steps in
+    # self.state[p]. Creating a new optimizer each step would discard that history,
+    # turning AdamW into plain gradient descent with no adaptive learning rates.
+    adamw_optimizer = AdamWOptimizer(
+        params=transformer_lm.parameters(),
+        lr=args.max_lr,
+        betas=(args.beta1, args.beta2),
+        eps=args.eps,
+        weight_decay=args.weight_decay,
+    )
+
+    # When resuming, restore model weights, optimizer state (m/v moments), and the
+    # step counter so the LR schedule continues from where training left off.
+    iteration_start = 0
+    if args.resume_from is not None:
+        iteration_start = load_checkpoint(
+            args.resume_from, transformer_lm, adamw_optimizer
+        )
+
+    for step in range(iteration_start, args.total_steps):
+        # Sample B random windows from the training corpus.
+        # input_tokens and target_tokens are both (B, T); targets are inputs shifted right by 1.
+        input_tokens, target_tokens = get_batch(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            context_length=args.context_length,
+            device=args.device,
+        )
+
+        # Forward pass: causal attention ensures position i only attends to positions ≤ i,
+        # so logits[b, i, :] predicts the distribution over the next token after position i.
+        # PyTorch records every operation into a computation graph for backward().
+        logits = transformer_lm(input_tokens)
+
+        # Cross-entropy averages -log(p_correct) over all B×T positions.
+        # The result is a scalar tensor still attached to the computation graph.
+        loss = cross_entropy(logits, target_tokens)
+
+        # Log before backward so loss.item() detaches the value without disturbing the graph.
+        if (step - iteration_start + 1) % args.log_interval == 0:
+            print(
+                f"[Training] step {step - iteration_start + 1} | loss {loss.item():.4f} | lr {adamw_optimizer.param_groups[0]['lr']:.2e}"
+            )
+
+        # Backpropagate: walk the computation graph in reverse, applying chain rule at each op.
+        # Each parameter's .grad is filled with ∂loss/∂p — the average gradient over B×T positions.
+        loss.backward()
+
+        # If the global L2 norm of all gradients exceeds grad_clip, scale them down proportionally.
+        # Prevents "exploding gradients" that would shove parameters far from a good region.
+        if args.grad_clip > 0:
+            gradient_clipping(transformer_lm.parameters(), args.grad_clip)
+
+        # Compute the learning rate for this step (warmup → cosine decay → min_lr floor).
+        # The LR lives in param_groups, not inside the optimizer itself, so we update it
+        # manually before each step(). The optimizer has no built-in schedule awareness.
+        lr = learning_rate_schedule(
+            it=step,
+            max_learning_rate=args.max_lr,
+            min_learning_rate=args.min_lr,
+            warmup_iters=args.warmup_steps,
+            cosine_cycle_iters=args.cosine_cycle_steps,
+        )
+        for group in adamw_optimizer.param_groups:
+            group["lr"] = lr
+
+        # Apply the AdamW update: use .grad, m, v, and the bias-corrected lr to nudge each parameter.
+        adamw_optimizer.step()
+
+        # Reset all .grad tensors to zero. PyTorch accumulates gradients by default —
+        # without this, the next backward() would add onto this step's gradients.
+        adamw_optimizer.zero_grad()
+
+        # Periodically snapshot model weights + optimizer state so training can be resumed
+        # after a crash or preemption without starting from scratch.
+        if (
+            args.checkpoint_interval
+            and (step - iteration_start + 1) % args.checkpoint_interval == 0
+        ):
+            save_checkpoint(
+                transformer_lm,
+                adamw_optimizer,
+                step,
+                f"{args.checkpoint_dir}/training_{step}.ckp",
+            )
+
+        # Run validation only every val_interval steps — skip otherwise.
+        if (step - iteration_start + 1) % args.val_interval != 0:
+            continue
+
+        # Switch to eval mode: disables dropout so all neurons are active and outputs are
+        # deterministic. Pair with torch.no_grad() which skips building the computation
+        # graph, saving the activation memory that backward() would otherwise need.
+        transformer_lm.eval()
+        validation_loss_sum = 0
+        for _ in range(args.val_steps):
+            validation_input_tokens, validation_target_tokens = get_batch(
+                dataset=validation_dataset,
+                batch_size=args.batch_size,
+                context_length=args.context_length,
+                device=args.device,
+            )
+            with torch.no_grad():
+                logits = transformer_lm(validation_input_tokens)
+                loss = cross_entropy(logits, validation_target_tokens)
+                validation_loss_sum += loss
+
+        # Average over val_steps batches for a more stable estimate than a single batch.
+        avg_val_loss = validation_loss_sum.item() / args.val_steps
+        print(f"[Validation] step {step - iteration_start + 1} | avg loss {avg_val_loss:.4f}")
+
+        # Restore training mode so dropout is active again for the next training step.
+        transformer_lm.train()
 
 
 if __name__ == "__main__":
