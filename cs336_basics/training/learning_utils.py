@@ -165,3 +165,4 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
         if p.grad is None:
             continue
         p.grad *= scale
+
